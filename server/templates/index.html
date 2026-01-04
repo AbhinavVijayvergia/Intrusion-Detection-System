@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IDS</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="header">
+    <div class="title">IDS</div>
+    <img src="{{ url_for('static', filename='ids.png') }}" class="logo">
+</div>
+
+<div class="controls">
+    <a href="/" class="btn">Refresh</a>
+    <a href="/clear" class="btn danger">Clear</a>
+</div>
+
+<div class="content">
+    {% if events %}
+        {% for e in events|reverse %}
+            <div class="card {{ e.severity }}">
+                <pre>{{ e | tojson(indent=2) }}</pre>
+            </div>
+        {% endfor %}
+    {% else %}
+        <p class="empty">No alerts yet.</p>
+    {% endif %}
+</div>
+
+</body>
+</html>
