@@ -4,88 +4,137 @@ import ipaddress
 import json
 import base64
 import requests
+import os
+from datetime import datetime
+import time
+from collections import defaultdict, deque
 
-class pckt(object):
-	def __init__(self, time_stamp:str='', ipsrc:str='', ipdst:str='', srcport:str='', dstport:str='', transport_layer:str='', highest_layer:str=''):
-		self.time_stamp = time_stamp
-		self.ipsrc = ipsrc
-		self.ipdst = ipdst
-		self.srcport = srcport
-		self.dstport = dstport
-		self.transport_layer = transport_layer
-		self.highest_layer = highest_layer
+WINDOW_SIZE = 10
+THRESHOLD = 50
 
-class apiServer(object):
-	def __init__(self, ip:str, port:str):
-		self.ip = ip
-		self.port = port
-server = apiServer('192.168.2.132', '8080')
+LOG_DIR = "logs"
+os.makedirs(LOG_DIR, exist_ok=True)
 
-intF = netifaces.gateways()['default'][netifaces.AF_INET][1]
+packet_window = defaultdict(deque)
+
+class PacketEvent:
+    def __init__(
+        self,
+        severity="INFO",
+        time_stamp="",
+        ipsrc="",
+        ipdst="",
+        srcport="",
+        dstport="",
+        transport_layer="",
+        highest_layer=""
+    ):
+        self.time_stamp = time_stamp
+        self.severity = severity
+        self.ipsrc = ipsrc
+        self.ipdst = ipdst
+        self.srcport = srcport
+        self.dstport = dstport
+        self.transport_layer = transport_layer
+        self.highest_layer = highest_layer
+
+
+class APIServer:
+    def __init__(self, ip: str, port: str):
+        self.ip = ip
+        self.port = port
+
+
+server = APIServer("192.168.2.132", 8080)
+
+intF = netifaces.gateways()["default"][netifaces.AF_INET][1]
 capture = pyshark.LiveCapture(interface=intF)
 
-def is_api_server(packet:capture, server:apiServer):
 
-    if hasattr(packet, 'ip'):
+def is_api_server(packet, server: APIServer) -> bool:
+    if hasattr(packet, "ip"):
         return packet.ip.src == server.ip or packet.ip.dst == server.ip
     return False
 
 
+def is_private_ip(ip_address: str) -> bool:
+    return ipaddress.ip_address(ip_address).is_private
 
-def is_private_ip(ip_address:str)-> bool:
-	ip = ipaddress.ip_address(ip_address)
-	return ip.is_private
 
-def report(message:pckt):
-	temp = json.dumps(message.__dict__)
-	jsonString = temp.encode('ascii')
-	b64 = base64.b64encode(jsonString)
+def log_event(message: PacketEvent):
+    date = datetime.utcnow().strftime("%Y-%m-%d")
+    logfile = os.path.join(LOG_DIR, f"{date}.log")
+    with open(logfile, "a") as f:
+        f.write(json.dumps(message.__dict__) + "\n")
 
-	jsonPayload = b64.decode('utf8').replace("'", '"')
-	print(jsonPayload)
 
-	try:
-		x = requests.get('http://{}:{}/api/?{}'.format(server.ip,server.port,jsonPayload))
-	except requests.exceptions.RequestException:
-		pass
+def report(message: PacketEvent):
+    log_event(message)
+    payload = base64.b64encode(
+        json.dumps(message.__dict__).encode("utf-8")
+    ).decode("utf-8")
+    print(payload)
+    try:
+        requests.get(f"http://{server.ip}:{server.port}/api/?{payload}")
+    except requests.exceptions.RequestException:
+        pass
 
-def filter(packet:capture):
 
-	if is_api_server(packet, server) is True:
-		return
+def detect_rate_abuse(datagram: PacketEvent) -> bool:
+    now = time.time()
+    q = packet_window[datagram.ipsrc]
+    q.append(now)
+    while q and now - q[0] > WINDOW_SIZE:
+        q.popleft()
+    if not q:
+        packet_window.pop(datagram.ipsrc, None)
+        return False
+    return len(q) > THRESHOLD
 
-	if hasattr(packet, 'icmp'):
-		DataGram = pckt()
-		DataGram.ipdst = packet.ip.dst
-		DataGram.ipsrc = packet.ip.src 
-		DataGram.highest_layer = packet.highest_layer
-		DataGram.transport_layer = packet.transport_layer
 
-	
-	if packet.transport_layer == 'TCP' or packet.transport_layer == 'UDP':
-		DataGram = pckt()
-		if hasattr(packet, 'ipv6'):
-			return None
+def filter_packet(packet):
+    if hasattr(packet, "ipv6"):
+        return
+    if is_api_server(packet, server):
+        return
+    if hasattr(packet, "icmp") and hasattr(packet, "ip"):
+        event = PacketEvent(
+            time_stamp=packet.sniff_time.isoformat(),
+            ipsrc=packet.ip.src,
+            ipdst=packet.ip.dst,
+            transport_layer="ICMP",
+            highest_layer=packet.highest_layer,
+            severity="INFO"
+        )
+        report(event)
+        return
+    if hasattr(packet, "transport_layer") and packet.transport_layer in ("TCP", "UDP"):
 
-		if hasattr(packet, 'ip'):
-			if (is_private_ip(packet.ip.src) is True) and (is_private_ip(packet.ip.dst) is True):
-
-				DataGram.ipsrc = packet.ip.src
-				DataGram.ipdst = packet.ip.dst
-				DataGram.time_stamp = packet.sniff_time.isoformat()
-				DataGram.highest_layer = packet.highest_layer
-				DataGram.transport_layer = packet.transport_layer
-					
-				if hasattr(packet, 'udp'):
-					DataGram.dstport = packet.udp.dstport
-					DataGram.srcport = packet.udp.srcport
-					
-				if hasattr(packet, 'tcp'):
-					DataGram.dstport = packet.tcp.dstport
-					DataGram.srcport = packet.tcp.srcport
-					report(DataGram)
-
+        if not hasattr(packet, "ip"):
+            return
+        if not (
+            is_private_ip(packet.ip.src)
+            and is_private_ip(packet.ip.dst)
+        ):
+            return
+        event = PacketEvent(
+            time_stamp=packet.sniff_time.isoformat(),
+            ipsrc=packet.ip.src,
+            ipdst=packet.ip.dst,
+            transport_layer=packet.transport_layer,
+            highest_layer=packet.highest_layer,
+        )
+        if hasattr(packet, "udp"):
+            event.srcport = packet.udp.srcport
+            event.dstport = packet.udp.dstport
+        elif hasattr(packet, "tcp"):
+            event.srcport = packet.tcp.srcport
+            event.dstport = packet.tcp.dstport
+        if detect_rate_abuse(event):
+            event.highest_layer = "RATE_ALERT"
+            event.severity = "ALERT"
+            report(event)
 
 
 for packet in capture.sniff_continuously():
-	filter(packet)
+    filter_packet(packet)
