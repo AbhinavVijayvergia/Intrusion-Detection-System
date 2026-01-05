@@ -132,3 +132,10 @@ Alert types:
 * Uses heuristic-based detection (not signature-based)
 * Not hardened for production environments
 * No persistence beyond in-memory storage
+
+
+##Related Cloud Security Knowledge
+
+* Google Cloud VPC design, routing, firewall rules
+* Network security controls and segmentation
+* Data protection concepts (DLP, access control)
